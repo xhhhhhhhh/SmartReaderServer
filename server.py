@@ -1,9 +1,13 @@
 from flask import Flask, request, jsonify
-import google.generativeai as genai
-import os
+from pydantic_ai.models.gemini import GeminiModel
+from pydantic_ai import Agent
 from dotenv import load_dotenv
 
 app = Flask(__name__)
+load_dotenv()
+model = GeminiModel('gemini-2.5-flash')
+agent = Agent(model,
+              system_prompt="You are helping reader to understand the book")
 
 @app.route("/message", methods=["POST"])
 def receive_message():
@@ -42,9 +46,8 @@ Please provide a clear answer and brief explanation using the current page prima
 explanation in Chinese, only use other language when reference to original text is needed.
 """
 
-        client = genai.GenerativeModel('gemini-2.5-flash')
-        response = client.generate_content(prompt)
-        answer = response.candidates[0].content.parts[0].text
+        response = agent.run_sync(prompt)
+        answer = response.output
 
         return jsonify({"answer": answer})
     except Exception as e:
@@ -52,5 +55,4 @@ explanation in Chinese, only use other language when reference to original text 
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    load_dotenv()
     app.run(host='0.0.0.0', port=8080, debug=True)
