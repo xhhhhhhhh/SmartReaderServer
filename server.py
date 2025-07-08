@@ -17,6 +17,7 @@ def receive_message():
 
 @app.route('/ask', methods=['POST'])
 def handle_question():
+    global history
     try:
         data = request.get_json()
 
@@ -45,8 +46,8 @@ User's question: {question}
 Please provide a clear answer and brief explanation using the current page primarily, and the full book if needed. Please Privode the answer and
 explanation in Chinese, only use other language when reference to original text is needed.
 """
-
-        response = agent.run_sync(prompt)
+        response = agent.run_sync(prompt, message_history=history)
+        history = list(response.all_messages())
         answer = response.output
 
         return jsonify({"answer": answer})
@@ -55,4 +56,5 @@ explanation in Chinese, only use other language when reference to original text 
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
+    history = []
     app.run(host='0.0.0.0', port=8080, debug=True)
