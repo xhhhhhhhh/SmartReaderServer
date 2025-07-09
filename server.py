@@ -51,6 +51,7 @@ def preload_text_async(txt_id: str, full_text: str):
             chromadb_collection = chromadb_client.get_or_create_collection(txt_id)
             chunks = get_chunks(full_text)
             for index in range(0, len(chunks)):
+                print(f"init in progress {index}/{len(chunks)}")
                 embedding = embed(chunks[index], True)
                 chromadb_collection.upsert(ids=[str(index)], documents=[chunks[index]], embeddings=[embedding])
             print("complete init")
