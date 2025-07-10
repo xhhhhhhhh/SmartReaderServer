@@ -6,7 +6,7 @@ import threading
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 import chromadb
 import google.generativeai as genai
-from threading import Event
+from flask import request
 
 app = Flask(__name__)
 load_dotenv()
@@ -27,6 +27,15 @@ chromadb_client = chromadb.PersistentClient("./chroma.db")
 model = GeminiModel('gemini-2.5-flash')
 agent = Agent(model, system_prompt="You are helping reader to understand the book")
 
+@app.before_request
+def log_request_info():
+    print(f"\n[⇩] Incoming {request.method} {request.path}")
+    print("Headers:", dict(request.headers))
+    if request.is_json:
+        print("JSON:", request.get_json(silent=True))
+    else:
+        print("Body:", request.get_data(as_text=True))
+
 def get_chunks(input_text) -> list[str]:
     return text_splitter.split_text(input_text)
 
@@ -42,25 +51,6 @@ def collections_exist(txt_id: str) -> bool:
     print(f"Collection '{txt_id}' exists? {exists}")
     return  exists
 
-def preload_text_async(txt_id: str, full_text: str):
-    try:
-        print("start init")
-        exists = collections_exist(txt_id)
-        if not exists:
-            sessions[txt_id] = threading.Event()
-            chromadb_collection = chromadb_client.get_or_create_collection(txt_id)
-            chunks = get_chunks(full_text)
-            for index in range(0, len(chunks)):
-                print(f"init in progress {index}/{len(chunks)}")
-                embedding = embed(chunks[index], True)
-                chromadb_collection.upsert(ids=[str(index)], documents=[chunks[index]], embeddings=[embedding])
-            print("complete init")
-            sessions[txt_id].set()
-
-        print(f"[✓] Preload complete for txt_id: {txt_id}")
-    except Exception as e:
-        print(f"[✗] Failed to preload for txt_id: {txt_id} → {e}")
-
 def query_db(txt_id: str, question: str) -> list[str]:
     exists = collections_exist(txt_id)
     if not exists:
@@ -74,20 +64,6 @@ def query_db(txt_id: str, question: str) -> list[str]:
     assert result["documents"]
     return result["documents"][0]
 
-@app.route("/init", methods=["POST"])
-def init_text():
-    data = request.get_json()
-    txt_id = data.get("txt_id")
-    full_text = data.get("full_text")
-    histories[txt_id] = []
-
-    if not txt_id or not full_text:
-        return jsonify({"error": "Missing txt_id or full_text"}), 400
-
-    # Start background thread
-    threading.Thread(target=preload_text_async, args=(txt_id, full_text), daemon=True).start()
-    return jsonify({"status": "initializing"})
-
 @app.route("/ask", methods=["POST"])
 def ask_question():
     try:
@@ -97,12 +73,7 @@ def ask_question():
         question = data.get("question", "")
 
         if not collections_exist(txt_id):
-            return jsonify({"gemini not ready"})
-        if txt_id not in sessions:
-            return jsonify({"error": f"No session initialized for txt_id: {txt_id}"}), 404
-
-        # Wait for preload if still in progress
-        sessions[txt_id].wait()
+            return jsonify({"error": "gemini not ready"}), 404
 
         prompt = "Please answer user's question according to context\n"
         prompt += f"Question: {question}\n"
@@ -113,6 +84,8 @@ def ask_question():
             prompt += f"{c}\n"
             prompt += "-------------\n"
         print(f"\nprompt is {prompt}\n")
+        if txt_id not in histories:
+            histories[txt_id] = []
         answer = agent.run_sync(prompt, message_history=histories[txt_id])
         histories[txt_id] = list(answer.all_messages())
         print(f"answer is {answer}")
@@ -126,6 +99,43 @@ def status():
     return jsonify({
         "sessions": list(sessions.keys())
     })
+
+def process_page_worker(page_md5: str, page_text: str, txt_id: str):
+    try:
+        if collections_exist(page_md5):
+            print(f"[•] Page {page_md5} already processed")
+            return
+
+        chromadb_collection = chromadb_client.get_or_create_collection(txt_id)
+        chunks = get_chunks(page_text)
+        for index, chunk in enumerate(chunks):
+            embedding = embed(chunk, store=True)
+            chromadb_collection.upsert(
+                ids=[txt_id+str(index)],
+                documents=[chunk],
+                embeddings=[embedding]
+            )
+        print(f"[✓] Page {page_md5} processed successfully")
+    except Exception as e:
+        print(f"[✗] Error in process_page_worker → {e}")
+
+@app.route("/process_page", methods=["POST"])
+def process_page():
+    try:
+        data = request.get_json()
+        page_md5 = data.get("page_md5")
+        page_text = data.get("text")
+        txt_id = data.get("txt_id")
+
+        if not page_md5 or not page_text:
+            return jsonify({"error": "Missing page_md5 or text"}), 400
+
+        threading.Thread(target=process_page_worker, args=(page_md5, page_text, txt_id), daemon=True).start()
+        return jsonify({"status": "processing in background"})
+    except Exception as e:
+        print(f"[✗] Error in /process_page → {e}")
+        return jsonify({"error": str(e)}), 500
+
 
 if __name__ == '__main__':
     import sys
